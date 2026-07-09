@@ -13,19 +13,32 @@ Sequence per the video (short side; long side is the mirror image):
    low below entry) offering at least ``min_rr`` R; otherwise a fixed
    ``fallback_rr`` R target.
 
+Optional refinements (all off by default — see STRATEGY.md):
+
+- KILLZONES     — only enter during defined UTC hour windows.
+- DAY FILTER    — only enter on given weekdays (in-sample-derived; beware).
+- NEWS FILTER   — no entries within a buffer around supplied news times.
+- FVG QUALITY   — the inverted 1H FVG must have formed with displacement
+  (candle-2 body >= ``min_fvg_quality`` x ATR).
+- DISPLACEMENT CISD — the structure-breaking candle needs a real body
+  (>= ``cisd_min_body_atr`` x ATR); weak closes don't consume the level.
+- PARTIAL TARGETS — take half off at the nearest liquidity (>= ``partial_rr1``
+  R), move the stop to breakeven, run the rest to the main target.
+
 Everything is computed bar-by-bar with no lookahead: swings confirm N bars
 after the pivot, daily zones only become usable the day after the daily
 candle completes, and all lifecycle updates use completed bars only.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
 
 from .bpr import bpr_from
 from .fvg import FVG, fvg_at, update_lifecycle
+from .indicators import atr as atr_indicator
 from .structure import Swing, cisd_event, confirm_swings_at
 
 
@@ -44,6 +57,22 @@ class Params:
     risk_pct: float = 0.01      # fraction of equity risked per trade
     daily_bpr_max_age: int = 30 # max daily bars between overlapping FVGs
 
+    # --- optional contextual filters (all off by default) ---
+    killzones: Optional[Sequence[Tuple[int, int]]] = None
+                                # UTC hour windows [start, end), e.g. ((7,10),(12,15))
+    allowed_days: Optional[Sequence[int]] = None
+                                # weekdays 0=Mon..6=Sun; None = all days
+    news_times: Optional[Sequence[pd.Timestamp]] = None
+                                # UTC timestamps of high-impact events
+    news_buffer_min: int = 60   # no entries within +/- this many minutes of news
+
+    # --- optional logic refinements (off by default) ---
+    min_fvg_quality: float = 0.0    # displacement body / ATR of the inverted 1H FVG
+    cisd_min_body_atr: float = 0.0  # CISD breaking-candle body >= this x ATR
+    partial_targets: bool = False   # two-stage exits with breakeven move
+    partial_rr1: float = 1.0        # min R for the first (partial) target
+    atr_n: int = 14                 # ATR period for the displacement measures
+
 
 @dataclass
 class Bias:
@@ -60,9 +89,14 @@ class OpenTrade:
     entry_idx: int
     entry: float
     stop: float
-    target: float
+    target: float               # main (final) target
     rr_target: float
     zone_source: str
+    t1: Optional[float] = None  # partial target (None = single-target mode)
+    rr1: float = 0.0
+    half_closed: bool = False
+    realized_r: float = 0.0     # R banked by the partial exit
+    risk0: float = 0.0          # initial risk in price units (fixed at entry)
 
 
 def _prepare_daily_zones(daily_df: pd.DataFrame, p: Params):
@@ -84,26 +118,62 @@ def _prepare_daily_zones(daily_df: pd.DataFrame, p: Params):
     return zones
 
 
-def _pick_target(direction: str, entry: float, risk: float, swings: List[Swing],
-                 t: int, p: Params):
-    """Nearest resting liquidity beyond ``min_rr``; else fixed fallback R."""
+def _liquidity_levels(direction: str, entry: float, swings: List[Swing],
+                      t: int, p: Params) -> List[float]:
+    """Confirmed swing levels beyond the entry, nearest first."""
     if direction == "short":
-        candidates = [s for s in swings
-                      if s.kind == "low" and s.price < entry and s.idx >= t - p.target_lookback]
-        candidates.sort(key=lambda s: -s.price)  # nearest (highest) first
-        for s in candidates:
-            rr = (entry - s.price) / risk
-            if rr >= p.min_rr:
-                return s.price, rr
-        return entry - p.fallback_rr * risk, p.fallback_rr
-    candidates = [s for s in swings
-                  if s.kind == "high" and s.price > entry and s.idx >= t - p.target_lookback]
-    candidates.sort(key=lambda s: s.price)       # nearest (lowest) first
-    for s in candidates:
-        rr = (s.price - entry) / risk
+        levels = [s.price for s in swings
+                  if s.kind == "low" and s.price < entry and s.idx >= t - p.target_lookback]
+        return sorted(set(levels), reverse=True)
+    levels = [s.price for s in swings
+              if s.kind == "high" and s.price > entry and s.idx >= t - p.target_lookback]
+    return sorted(set(levels))
+
+
+def _pick_targets(direction: str, entry: float, risk: float, swings: List[Swing],
+                  t: int, p: Params):
+    """Return (t1, rr1, t2, rr2). t1 is None unless partial_targets is on
+    and a nearer liquidity level exists between partial_rr1 and the main RR."""
+    sign = -1.0 if direction == "short" else 1.0
+    levels = _liquidity_levels(direction, entry, swings, t, p)
+
+    def rr_of(price):
+        return sign * (price - entry) / risk
+
+    t2, rr2 = None, None
+    for price in levels:
+        rr = rr_of(price)
         if rr >= p.min_rr:
-            return s.price, rr
-    return entry + p.fallback_rr * risk, p.fallback_rr
+            t2, rr2 = price, rr
+            break
+    if t2 is None:
+        rr2 = p.fallback_rr
+        t2 = entry + sign * p.fallback_rr * risk
+
+    t1, rr1 = None, 0.0
+    if p.partial_targets:
+        for price in levels:
+            rr = rr_of(price)
+            if p.partial_rr1 <= rr < rr2:
+                t1, rr1 = price, rr
+                break
+    return t1, rr1, t2, rr2
+
+
+def _entry_allowed(ts: pd.Timestamp, p: Params) -> bool:
+    """Apply the contextual filters (killzone / day-of-week / news)."""
+    ts_utc = ts.tz_convert("UTC") if ts.tzinfo is not None else ts
+    if p.killzones is not None:
+        if not any(start <= ts_utc.hour < end for start, end in p.killzones):
+            return False
+    if p.allowed_days is not None and ts_utc.weekday() not in p.allowed_days:
+        return False
+    if p.news_times:
+        buffer = pd.Timedelta(minutes=p.news_buffer_min)
+        for nt in p.news_times:
+            if abs(ts_utc - nt) <= buffer:
+                return False
+    return True
 
 
 def run_strategy(daily_df: pd.DataFrame, h1_df: pd.DataFrame,
@@ -111,11 +181,13 @@ def run_strategy(daily_df: pd.DataFrame, h1_df: pd.DataFrame,
     """Run the full walk-forward strategy. Returns a DataFrame of trades."""
     p = p or Params()
 
+    opens = h1_df["open"].to_numpy()
     highs = h1_df["high"].to_numpy()
     lows = h1_df["low"].to_numpy()
     closes = h1_df["close"].to_numpy()
     times = h1_df.index
     h1_dates = [ts.date() for ts in times]
+    atr = atr_indicator(highs, lows, closes, p.atr_n)
 
     pending_zones = sorted(_prepare_daily_zones(daily_df, p), key=lambda z: z[0])
     zone_ptr = 0
@@ -127,12 +199,12 @@ def run_strategy(daily_df: pd.DataFrame, h1_df: pd.DataFrame,
     open_trade: Optional[OpenTrade] = None
     trades = []
 
-    def close_trade(trade: OpenTrade, t: int, exit_price: float, outcome: str):
-        risk = abs(trade.stop - trade.entry)
-        if trade.direction == "short":
-            r = (trade.entry - exit_price) / risk
-        else:
-            r = (exit_price - trade.entry) / risk
+    def close_trade(trade: OpenTrade, t: int, exit_price: float, outcome: str,
+                    fraction: float = 1.0):
+        """Book the final exit; ``fraction`` is the position share still open."""
+        sign = 1.0 if trade.direction == "long" else -1.0
+        leg_r = sign * (exit_price - trade.entry) / trade.risk0
+        total_r = trade.realized_r + fraction * leg_r
         trades.append({
             "direction": trade.direction,
             "entry_time": times[trade.entry_idx],
@@ -142,7 +214,7 @@ def run_strategy(daily_df: pd.DataFrame, h1_df: pd.DataFrame,
             "target": trade.target,
             "exit": exit_price,
             "rr_target": trade.rr_target,
-            "r": r,
+            "r": total_r,
             "outcome": outcome,
             "zone_source": trade.zone_source,
             "bars_held": t - trade.entry_idx,
@@ -159,38 +231,47 @@ def run_strategy(daily_df: pd.DataFrame, h1_df: pd.DataFrame,
         # --- manage open position first (stop checked before target: conservative)
         if open_trade is not None:
             tr = open_trade
-            if tr.direction == "short":
-                if hi >= tr.stop:
-                    close_trade(tr, t, tr.stop, "stop")
-                    open_trade = None
-                elif lo <= tr.target:
-                    close_trade(tr, t, tr.target, "target")
-                    open_trade = None
-            else:
-                if lo <= tr.stop:
-                    close_trade(tr, t, tr.stop, "stop")
-                    open_trade = None
-                elif hi >= tr.target:
-                    close_trade(tr, t, tr.target, "target")
-                    open_trade = None
+            stop_hit = hi >= tr.stop if tr.direction == "short" else lo <= tr.stop
+            t1_hit = (tr.t1 is not None and not tr.half_closed and
+                      (lo <= tr.t1 if tr.direction == "short" else hi >= tr.t1))
+            t2_hit = lo <= tr.target if tr.direction == "short" else hi >= tr.target
+
+            if stop_hit:
+                outcome = "be_stop" if tr.half_closed else "stop"
+                fraction = 0.5 if tr.half_closed else 1.0
+                close_trade(tr, t, tr.stop, outcome, fraction)
+                open_trade = None
+            elif t1_hit:
+                # bank half at T1, stop to breakeven; T2 same-bar not credited
+                tr.realized_r = 0.5 * tr.rr1
+                tr.half_closed = True
+                tr.stop = tr.entry
+            elif t2_hit:
+                fraction = 0.5 if tr.half_closed else 1.0
+                close_trade(tr, t, tr.target, "target", fraction)
+                open_trade = None
             if open_trade is not None and t - tr.entry_idx >= p.max_hold:
-                close_trade(tr, t, cl, "time")
+                fraction = 0.5 if tr.half_closed else 1.0
+                close_trade(tr, t, cl, "time", fraction)
                 open_trade = None
 
         # --- structure updates for this completed bar
         swings.extend(confirm_swings_at(highs, lows, t, p.swing_n))
         swing_highs = [s for s in swings if s.kind == "high"]
         swing_lows = [s for s in swings if s.kind == "low"]
-        cisd = cisd_event(cl, swing_highs, swing_lows)
+        cisd = cisd_event(cl, swing_highs, swing_lows,
+                          body=abs(cl - opens[t]), atr=float(atr[t]),
+                          min_body_atr=p.cisd_min_body_atr)
 
         # --- 1H FVG bookkeeping: new gap + inversion events
-        inversion_events = []       # directions confirmed by an inversion this bar
+        inversion_events = []       # (direction confirmed, fvg) this bar
         for f in h1_fvgs:
             if update_lifecycle(f, hi, lo, cl, t):
-                # a bullish FVG closed through downward confirms bearish flow
                 inversion_events.append(("bearish" if f.direction == "bullish" else "bullish", f))
         new_h1 = fvg_at(highs, lows, t)
         if new_h1 is not None:
+            body2 = abs(closes[t - 1] - opens[t - 1])
+            new_h1.quality = body2 / atr[t - 1] if atr[t - 1] > 0 else 0.0
             h1_fvgs.append(new_h1)
         if len(h1_fvgs) > 500:
             h1_fvgs = h1_fvgs[-300:]
@@ -220,32 +301,32 @@ def run_strategy(daily_df: pd.DataFrame, h1_df: pd.DataFrame,
         # --- confirmation flags
         if bias is not None:
             for ev_dir, f in inversion_events:
-                if ev_dir == bias.direction and f.formed_idx >= bias.opened_idx - p.h1_fvg_max_age:
+                if (ev_dir == bias.direction
+                        and f.formed_idx >= bias.opened_idx - p.h1_fvg_max_age
+                        and f.quality >= p.min_fvg_quality):
                     bias.inversion_done = True
             if cisd == bias.direction:
                 bias.cisd_done = True
 
         # --- entry
         if (bias is not None and open_trade is None
-                and bias.inversion_done and bias.cisd_done):
+                and bias.inversion_done and bias.cisd_done
+                and _entry_allowed(times[t], p)):
             lb = max(0, t - p.stop_lookback + 1)
             if bias.direction == "bearish":
                 stop = float(np.max(highs[lb:t + 1])) * (1 + p.stop_buffer)
                 entry = cl
                 risk = stop - entry
-                if risk > 0:
-                    target, rr = _pick_target("short", entry, risk, swings, t, p)
-                    open_trade = OpenTrade("short", t, entry, stop, target, rr,
-                                           bias.zone.source)
+                direction = "short"
             else:
                 stop = float(np.min(lows[lb:t + 1])) * (1 - p.stop_buffer)
                 entry = cl
                 risk = entry - stop
-                if risk > 0:
-                    target, rr = _pick_target("long", entry, risk, swings, t, p)
-                    open_trade = OpenTrade("long", t, entry, stop, target, rr,
-                                           bias.zone.source)
-            if open_trade is not None:
+                direction = "long"
+            if risk > 0:
+                t1, rr1, t2, rr2 = _pick_targets(direction, entry, risk, swings, t, p)
+                open_trade = OpenTrade(direction, t, entry, stop, t2, rr2,
+                                       bias.zone.source, t1=t1, rr1=rr1, risk0=risk)
                 bias.zone.consumed = True
             bias = None
 

@@ -19,7 +19,9 @@ def fetch(symbol: str, interval: str, period: str, use_cache: bool = True) -> pd
     cache_file = DATA_DIR / f"{safe}_{interval}_{period}.csv"
 
     if use_cache and cache_file.exists():
-        return pd.read_csv(cache_file, index_col=0, parse_dates=True)
+        df = pd.read_csv(cache_file, index_col=0)
+        df.index = pd.to_datetime(df.index, utc=interval != "1d")
+        return df
 
     df = yf.download(symbol, interval=interval, period=period, auto_adjust=True, progress=False)
     if df is None or df.empty:
@@ -28,5 +30,7 @@ def fetch(symbol: str, interval: str, period: str, use_cache: bool = True) -> pd
         df.columns = df.columns.droplevel(1)
     df = df.rename(columns=str.lower)[["open", "high", "low", "close"]]
     df = df[~df.index.duplicated(keep="first")].sort_index().dropna()
+    if df.index.tz is not None:
+        df.index = df.index.tz_convert("UTC")   # one canonical clock for filters
     df.to_csv(cache_file)
     return df

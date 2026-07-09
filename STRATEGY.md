@@ -112,6 +112,26 @@ All parameters live in `ict/strategy.py::Params`:
 | `risk_pct` | 0.01 | equity fraction risked per trade |
 | `daily_bpr_max_age` | 30 | max daily bars between FVGs forming a BPR |
 
+### Optional refinements & contextual filters (all off by default)
+
+Added in v2 after an external optimization review; every one was ablation-tested
+on the same data (see the README for results — most did **not** help).
+
+| Parameter | Default | Meaning |
+|-----------|---------|---------|
+| `min_fvg_quality` | 0.0 | the inverted 1H FVG must have formed with displacement: middle-candle body ≥ this × ATR(14). **Only refinement that improved expectancy** (at 0.5) |
+| `partial_targets` | False | two-stage exits: half off at the nearest liquidity ≥ `partial_rr1` R, stop to breakeven, rest runs to the main target. Cut max drawdown roughly in half |
+| `partial_rr1` | 1.0 | minimum R for the partial target |
+| `cisd_min_body_atr` | 0.0 | CISD breaking candle needs a body ≥ this × ATR; weak closes don't consume the swing level. *Tested worse than baseline* |
+| `killzones` | None | UTC hour windows for entries, e.g. `((7,10),(12,15))`. *Tested worse than baseline on this data* |
+| `allowed_days` | None | weekday whitelist (0=Mon..6=Sun). **Warning: any day-of-week choice is mined from in-sample results** |
+| `news_times` / `news_buffer_min` | None / 60 | block entries within a buffer of supplied high-impact news timestamps (user-provided CSV via `--news-csv`) |
+| `atr_n` | 14 | ATR period used by the displacement measures |
+
+CLI equivalents: `--quality`, `--partials`, `--cisd-body`, `--killzones "7-10,12-15"`,
+`--days Mon,Tue,Thu`, `--news-csv file.csv`, and `--refined`
+(= `--quality 0.5 --partials`, the only combination that survived testing).
+
 ---
 
 ## Deviations from the video

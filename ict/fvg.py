@@ -25,6 +25,7 @@ class FVG:
     inverted: bool = False    # price closed through the far side of the zone
     inverted_idx: Optional[int] = None
     consumed: bool = False    # a trade was already taken off this zone
+    quality: float = 0.0      # displacement score: body(candle2) / ATR at formation
 
     @property
     def alive(self) -> bool:

@@ -107,6 +107,79 @@ class TestStructure(unittest.TestCase):
         swing_highs = [Swing("high", 10, 1.00)]
         self.assertEqual(cisd_event(1.01, swing_highs, []), "bullish")
 
+    def test_displacement_filter_keeps_level_live(self):
+        from ict.structure import Swing
+        swing_lows = [Swing("low", 10, 1.00)]
+        # weak body: no event, level NOT consumed
+        self.assertIsNone(cisd_event(0.999, [], swing_lows,
+                                     body=0.0001, atr=0.001, min_body_atr=0.5))
+        self.assertFalse(swing_lows[0].broken)
+        # displacement close later still fires on the same level
+        self.assertEqual(cisd_event(0.995, [], swing_lows,
+                                    body=0.0008, atr=0.001, min_body_atr=0.5),
+                         "bearish")
+        self.assertTrue(swing_lows[0].broken)
+
+
+class TestIndicators(unittest.TestCase):
+    def test_atr_basic(self):
+        from ict.indicators import atr
+        highs = np.array([1.2, 1.3, 1.25])
+        lows = np.array([1.0, 1.1, 1.15])
+        closes = np.array([1.1, 1.2, 1.2])
+        a = atr(highs, lows, closes, n=14)
+        self.assertAlmostEqual(a[0], 0.2)           # first bar: range
+        self.assertAlmostEqual(a[1], 0.2)           # TRs: 0.2, 0.2 -> mean 0.2
+        self.assertAlmostEqual(a[2], (0.2 + 0.2 + 0.1) / 3)
+
+
+class TestFilters(unittest.TestCase):
+    def test_entry_allowed_killzone_and_days(self):
+        import pandas as pd
+        from ict.strategy import Params, _entry_allowed
+        p = Params(killzones=((7, 10), (12, 15)), allowed_days=(0, 1, 3))
+        tue_8utc = pd.Timestamp("2026-01-06 08:00", tz="UTC")     # Tuesday
+        wed_8utc = pd.Timestamp("2026-01-07 08:00", tz="UTC")     # Wednesday
+        tue_11utc = pd.Timestamp("2026-01-06 11:00", tz="UTC")
+        self.assertTrue(_entry_allowed(tue_8utc, p))
+        self.assertFalse(_entry_allowed(wed_8utc, p))              # day blocked
+        self.assertFalse(_entry_allowed(tue_11utc, p))             # hour blocked
+        # tz conversion: 09:00 +01:00 == 08:00 UTC -> allowed
+        self.assertTrue(_entry_allowed(pd.Timestamp("2026-01-06 09:00+01:00"), p))
+
+    def test_entry_allowed_news_buffer(self):
+        import pandas as pd
+        from ict.strategy import Params, _entry_allowed
+        news = [pd.Timestamp("2026-01-06 13:30", tz="UTC")]
+        p = Params(news_times=news, news_buffer_min=60)
+        self.assertFalse(_entry_allowed(pd.Timestamp("2026-01-06 13:00", tz="UTC"), p))
+        self.assertTrue(_entry_allowed(pd.Timestamp("2026-01-06 15:00", tz="UTC"), p))
+
+
+class TestPartialTargets(unittest.TestCase):
+    def test_pick_targets_partial_between_rr1_and_main(self):
+        from ict.strategy import Params, _pick_targets
+        from ict.structure import Swing
+        p = Params(partial_targets=True, partial_rr1=1.0, min_rr=2.0)
+        entry, risk = 1.100, 0.010
+        swings = [
+            Swing("low", 50, 1.088),   # 1.2R -> partial target
+            Swing("low", 60, 1.075),   # 2.5R -> main target
+        ]
+        t1, rr1, t2, rr2 = _pick_targets("short", entry, risk, swings, 100, p)
+        self.assertAlmostEqual(t2, 1.075)
+        self.assertAlmostEqual(rr2, 2.5)
+        self.assertAlmostEqual(t1, 1.088)
+        self.assertAlmostEqual(rr1, 1.2)
+
+    def test_pick_targets_fallback_when_no_liquidity(self):
+        from ict.strategy import Params, _pick_targets
+        p = Params(partial_targets=True)
+        t1, rr1, t2, rr2 = _pick_targets("short", 1.100, 0.010, [], 100, p)
+        self.assertAlmostEqual(t2, 1.100 - 3.0 * 0.010)
+        self.assertAlmostEqual(rr2, 3.0)
+        self.assertIsNone(t1)
+
 
 class TestStrategyEndToEnd(unittest.TestCase):
     def test_runs_on_synthetic_data(self):

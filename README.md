@@ -54,6 +54,55 @@ conclusion anticipated by the
 produced during extraction. The full trade log is in
 [`results/trades_EURUSD_X.csv`](results/trades_EURUSD_X.csv).
 
+## v2: optimization review, ablation-tested
+
+An external optimization report proposed six enhancements (killzone filtering,
+day-of-week filtering, news avoidance, FVG quality scoring, displacement-based
+CISD, and partial profit-taking). All six are now implemented as configurable
+parameters — and each was **ablation-tested** instead of taken on faith.
+Same data, same period, one change at a time:
+
+| Configuration | Trades | Win % | Total R | PF | Return | Max DD |
+|---------------|-------:|------:|--------:|---:|-------:|-------:|
+| baseline (v1) | 105 | 30.5 | −1.24 | 0.98 | −2.5% | −15.5% |
+| killzones 7–10, 12–15 UTC | 96 | 30.2 | −1.71 | 0.97 | −2.8% | −13.1% |
+| FVG quality ≥ 0.5 | 101 | 31.7 | **+3.50** | **1.05** | +2.3% | −13.2% |
+| CISD displacement ≥ 0.5 ATR | 99 | 27.3 | −10.02 | 0.86 | −10.5% | −15.6% |
+| partial targets | 105 | 41.0 | +0.69 | 1.01 | −0.2% | **−10.1%** |
+| **quality 0.5 + partials (`--refined`)** | 102 | 40.2 | **+1.35** | 1.02 | **+0.5%** | **−8.5%** |
+| everything combined | 97 | 37.1 | −8.26 | 0.86 | −8.7% | −12.3% |
+
+What survived testing:
+
+- **FVG quality scoring** (displacement body ≥ 0.5 × ATR) — the only change
+  that improved expectancy, and the `--refined` combo is positive in *both*
+  chronological halves of the data (+0.88R / +0.47R). Still statistically
+  indistinguishable from breakeven at ~100 trades.
+- **Partial targets** — don't add expectancy but nearly halve the max
+  drawdown (−15.5% → −8.5%) and lift the win rate to ~40%.
+
+What did **not** survive:
+
+- **Killzones** made results *worse*. The report's "profitable hours" (07:00,
+  11:00–12:00 UTC) flip sign between the first and second half of the sample —
+  and its own table shows 08:00 and 13:00–14:00, inside the proposed
+  killzones, are net losers. Classic in-sample pattern mining.
+- **Displacement CISD** cost −8.8R vs baseline: requiring a big-bodied
+  breaking candle makes entries later and stops effectively wider.
+- **Day-of-week filtering** (Tuesday good, Wednesday bad) is derived from the
+  backtest's own output. It's implemented (`--days`) but off by default and
+  labeled what it is: curve fitting.
+- **Stricter quality (≥ 1.0)** degrades again (PF 0.92, wildly unstable
+  halves) — the 0.5 reading is not a tunable edge, it's a coarse noise filter.
+
+**Bottom line:** honest filtering turns a coin flip into a slightly
+better-behaved coin flip (PF 1.02, half the drawdown). No configuration tested
+here turns the video's strategy into a demonstrated edge, and the "optimized"
+combination of *all* proposed filters loses more than the baseline.
+
+Reproduce with `python run_backtest.py --refined`
+(trade log: [`results/trades_EURUSD_X_refined.csv`](results/trades_EURUSD_X_refined.csv)).
+
 ## Quick start
 
 ```bash
@@ -62,8 +111,12 @@ pip install -r requirements.txt
 # run the backtest (downloads EURUSD daily + 1H data from Yahoo, cached in data/)
 python run_backtest.py
 
-# any Yahoo ticker works
+# best-behaved configuration found (FVG quality + partial targets)
+python run_backtest.py --refined
+
+# any Yahoo ticker works; filters are opt-in flags
 python run_backtest.py --symbol ES=F
+python run_backtest.py --killzones "7-10,12-15" --days Mon,Tue,Thu
 python run_backtest.py --symbol "EURUSD=X" --no-cache   # force fresh download
 
 # run the unit tests
@@ -79,15 +132,17 @@ python -m unittest discover -s tests
 ├── requirements.txt
 ├── ict/
 │   ├── data.py                <- Yahoo Finance download + CSV cache
-│   ├── fvg.py                 <- Fair Value Gap detection & lifecycle
+│   ├── fvg.py                 <- Fair Value Gap detection, lifecycle & quality
 │   ├── bpr.py                 <- Balanced Price Range (overlapping FVGs)
 │   ├── structure.py           <- swing points & CISD (structure breaks)
-│   ├── strategy.py            <- walk-forward multi-timeframe engine
+│   ├── indicators.py          <- ATR (used by the displacement measures)
+│   ├── strategy.py            <- walk-forward multi-timeframe engine + filters
 │   └── backtest.py            <- equity curve & statistics
 ├── tests/
 │   └── test_ict.py            <- unit tests for the detection primitives
 ├── results/
-│   └── trades_EURUSD_X.csv    <- trade log from the default run
+│   ├── trades_EURUSD_X.csv           <- trade log, baseline run
+│   └── trades_EURUSD_X_refined.csv   <- trade log, --refined run
 └── docs/video_extraction/     <- original video transcript & analysis docs
     ├── ...transcription....txt
     ├── Trading Strategy Analysis_ Max Anthony's ICT Concepts.md
