@@ -64,3 +64,35 @@ def cisd_event(close: float, swing_highs: List[Swing], swing_lows: List[Swing],
                 event = event or "bullish"
             break
     return event
+
+
+def smt_ok(direction: str, own_highs: List[float], own_lows: List[float],
+           other_highs: List[float], other_lows: List[float],
+           inverse: bool = True) -> bool:
+    """SMT (Smart Money Technique) divergence check against a correlated asset.
+
+    ``direction`` is the intended trade ('bearish' = short). Lists hold the
+    last confirmed swing prices in chronological order; at least two of each
+    relevant kind are required, otherwise the check fails (no divergence
+    evidence -> no trade when the filter is on).
+
+    Short example, inverse asset (EURUSD vs DXY): EURUSD sweeps to a higher
+    high while DXY *fails* to make the corresponding lower low -> divergence
+    confirms the short. ``inverse=False`` compares like-for-like extremes
+    (e.g. EURUSD vs GBPUSD: one makes the extreme, the other fails).
+    """
+    if direction == "bearish":
+        if len(own_highs) < 2:
+            return False
+        if own_highs[-1] <= own_highs[-2]:      # no higher high on the traded asset
+            return False
+        if inverse:
+            return len(other_lows) >= 2 and other_lows[-1] >= other_lows[-2]
+        return len(other_highs) >= 2 and other_highs[-1] <= other_highs[-2]
+    if len(own_lows) < 2:
+        return False
+    if own_lows[-1] >= own_lows[-2]:            # no lower low on the traded asset
+        return False
+    if inverse:
+        return len(other_highs) >= 2 and other_highs[-1] <= other_highs[-2]
+    return len(other_lows) >= 2 and other_lows[-1] >= other_lows[-2]

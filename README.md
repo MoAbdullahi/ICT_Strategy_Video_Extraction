@@ -103,6 +103,66 @@ combination of *all* proposed filters loses more than the baseline.
 Reproduce with `python run_backtest.py --refined`
 (trade log: [`results/trades_EURUSD_X_refined.csv`](results/trades_EURUSD_X_refined.csv)).
 
+## v3: cross-asset validation, SMT, PO3, and meta-labeling
+
+A second review round proposed "next generation" upgrades. Same protocol:
+implement everything, test everything, report what actually happened.
+
+### The ultimate test first: same parameters, other pairs
+
+`--refined` run unchanged on correlated majors (~2.8y each):
+
+| Pair | Trades | Win % | Total R | PF | Max DD |
+|------|-------:|------:|--------:|---:|-------:|
+| EURUSD | 102 | 40.2 | +1.35 | 1.02 | −8.5% |
+| GBPUSD | 114 | 43.0 | +0.81 | 1.01 | −13.5% |
+| USDJPY | 86 | 40.7 | +0.52 | 1.01 | −11.0% |
+| AUDUSD | 92 | 34.8 | **−19.27** | **0.68** | −27.1% |
+
+**Verdict: no universal edge.** Three pairs cluster at breakeven (PF ≈ 1.01)
+and AUDUSD loses heavily. A real institutional edge doesn't pick which
+correlated majors it works on.
+
+### DXY SMT divergence — the most interesting result so far
+
+Requiring SMT divergence vs the Dollar Index (`--smt DX-Y.NYB`) before entry
+(the pair sweeps a swing extreme, DXY fails to confirm):
+
+| Configuration | Trades | Win % | Total R | PF | Max DD | Halves R |
+|---------------|-------:|------:|--------:|---:|-------:|---------:|
+| EURUSD refined + SMT | 54 | 46.3 | +6.03 | 1.21 | −4.9% | +2.1 / +4.0 |
+| USDJPY refined + SMT | 56 | 48.2 | +8.06 | 1.29 | −6.1% | −0.2 / +8.3 |
+| AUDUSD refined + SMT | 56 | 42.9 | −2.80 | 0.91 | −11.9% | (was −19.3 without) |
+| GBPUSD refined + SMT | 61 | 37.7 | −7.10 | 0.81 | −13.6% | (was +0.8 without) |
+
+Two important honesty caveats. First, Yahoo's DXY hourly history starts
+2024-02, so SMT runs cover a shorter window — refined alone earns +3.44R on
+EURUSD in that same window, meaning SMT's true increment there is ~+2.6R, not
++6. Second, the cross-pair picture is mixed: it substantially helps EURUSD,
+USDJPY and AUDUSD but hurts GBPUSD. SMT halves the trade count and cuts
+drawdowns everywhere, is grounded in an a-priori ICT concept rather than mined
+from this data, and is the only filter tested that produced PF > 1.2 on two
+pairs — but it is **not yet a demonstrated edge**. It ships as an opt-in flag,
+not as part of `--refined`.
+
+### What didn't work (tested, EURUSD)
+
+| Proposal | Result | Why it fails |
+|----------|--------|--------------|
+| Power of 3 (`--po3`) | refined +PO3: −0.07R (PF 1.00); alone: −3.32R, sign-flipping halves | the daily-open manipulation check mostly removes random trades |
+| Dynamic sizing (`--dynamic-risk`) | same R stats, return +0.5% → −4.4%, DD −8.5% → −13.6% | FVG quality doesn't predict outcome beyond the 0.5 threshold, so sizing up on it just amplifies variance |
+| Meta-labeling (`research/meta_label.py`) | **CV AUC 0.394 ± 0.03** (0.5 = coin flip); the p≥0.5 gatekeeper keeps 6/41 holdout trades worth −1.37R vs +2.79R unfiltered | 102 trades cannot train a 7-feature classifier; the forest memorizes noise, and its confident picks are anti-predictive |
+
+### Why there is no walk-forward *parameter* optimization here
+
+The review also proposed rolling re-optimization (fit parameters on year 1,
+trade year 2). With ~50 trades per year per pair, every parameter choice a
+yearly re-fit makes is dominated by sampling noise — it would manufacture an
+impressive-looking curve out of the same coin flip. The validation used
+instead: fixed parameters everywhere, chronological-halves stability checks,
+and zero-refit transfer to three other pairs (above). That's the test the
+strategy keeps failing.
+
 ## Quick start
 
 ```bash
@@ -116,8 +176,12 @@ python run_backtest.py --refined
 
 # any Yahoo ticker works; filters are opt-in flags
 python run_backtest.py --symbol ES=F
-python run_backtest.py --killzones "7-10,12-15" --days Mon,Tue,Thu
+python run_backtest.py --refined --smt DX-Y.NYB          # + DXY SMT divergence
+python run_backtest.py --killzones "7-10,12-15" --days Mon,Tue,Thu --po3
 python run_backtest.py --symbol "EURUSD=X" --no-cache   # force fresh download
+
+# meta-labeling research study (requires scikit-learn)
+python research/meta_label.py
 
 # run the unit tests
 python -m unittest discover -s tests
@@ -135,9 +199,11 @@ python -m unittest discover -s tests
 │   ├── fvg.py                 <- Fair Value Gap detection, lifecycle & quality
 │   ├── bpr.py                 <- Balanced Price Range (overlapping FVGs)
 │   ├── structure.py           <- swing points & CISD (structure breaks)
-│   ├── indicators.py          <- ATR (used by the displacement measures)
+│   ├── indicators.py          <- ATR & RSI (displacement / research features)
 │   ├── strategy.py            <- walk-forward multi-timeframe engine + filters
 │   └── backtest.py            <- equity curve & statistics
+├── research/
+│   └── meta_label.py          <- ML gatekeeper study (honest null result)
 ├── tests/
 │   └── test_ict.py            <- unit tests for the detection primitives
 ├── results/

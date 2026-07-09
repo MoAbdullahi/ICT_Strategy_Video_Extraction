@@ -156,6 +156,43 @@ class TestFilters(unittest.TestCase):
         self.assertTrue(_entry_allowed(pd.Timestamp("2026-01-06 15:00", tz="UTC"), p))
 
 
+class TestSMT(unittest.TestCase):
+    def test_bearish_smt_inverse(self):
+        from ict.structure import smt_ok
+        # EURUSD makes a higher high; DXY fails to make a lower low -> divergence
+        self.assertTrue(smt_ok("bearish", own_highs=[1.10, 1.12], own_lows=[],
+                               other_highs=[], other_lows=[104.0, 104.5], inverse=True))
+        # DXY confirms with its own lower low -> no divergence
+        self.assertFalse(smt_ok("bearish", own_highs=[1.10, 1.12], own_lows=[],
+                                other_highs=[], other_lows=[104.0, 103.5], inverse=True))
+        # EURUSD made no higher high -> nothing to diverge from
+        self.assertFalse(smt_ok("bearish", own_highs=[1.12, 1.10], own_lows=[],
+                                other_highs=[], other_lows=[104.0, 104.5], inverse=True))
+
+    def test_bullish_smt_same_correlation(self):
+        from ict.structure import smt_ok
+        # own asset lower low; positively-correlated peer holds its low
+        self.assertTrue(smt_ok("bullish", own_highs=[], own_lows=[1.10, 1.08],
+                               other_highs=[], other_lows=[1.25, 1.26], inverse=False))
+        self.assertFalse(smt_ok("bullish", own_highs=[], own_lows=[1.10, 1.08],
+                                other_highs=[], other_lows=[1.25, 1.20], inverse=False))
+
+    def test_insufficient_swings_fails_closed(self):
+        from ict.structure import smt_ok
+        self.assertFalse(smt_ok("bearish", own_highs=[1.10], own_lows=[],
+                                other_highs=[], other_lows=[104.0, 104.5], inverse=True))
+
+
+class TestRSI(unittest.TestCase):
+    def test_rsi_bounds_and_direction(self):
+        from ict.indicators import rsi
+        up = rsi(np.linspace(1.0, 2.0, 50))
+        down = rsi(np.linspace(2.0, 1.0, 50))
+        self.assertGreater(up[-1], 90)
+        self.assertLess(down[-1], 10)
+        self.assertTrue(((up >= 0) & (up <= 100)).all())
+
+
 class TestPartialTargets(unittest.TestCase):
     def test_pick_targets_partial_between_rr1_and_main(self):
         from ict.strategy import Params, _pick_targets

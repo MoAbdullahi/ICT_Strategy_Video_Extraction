@@ -39,7 +39,7 @@ import pandas as pd
 from .bpr import bpr_from
 from .fvg import FVG, fvg_at, update_lifecycle
 from .indicators import atr as atr_indicator
-from .structure import Swing, cisd_event, confirm_swings_at
+from .structure import Swing, cisd_event, confirm_swings_at, smt_ok
 
 
 @dataclass
@@ -73,6 +73,15 @@ class Params:
     partial_rr1: float = 1.0        # min R for the first (partial) target
     atr_n: int = 14                 # ATR period for the displacement measures
 
+    # --- Power of 3: entry only after the daily-open manipulation leg ---
+    po3: bool = False               # short: price must have traded above today's
+                                    # open first (Judas swing); long: below it
+
+    # --- cross-asset SMT divergence (e.g. EURUSD vs DXY) ---
+    smt_df: Optional[pd.DataFrame] = None   # correlated asset 1H OHLC (UTC index)
+    smt_inverse: bool = True        # True: inversely correlated (DXY vs EURUSD)
+    smt_lookback_bars: int = 120    # swings older than this (1H bars) are ignored
+
 
 @dataclass
 class Bias:
@@ -81,6 +90,7 @@ class Bias:
     opened_idx: int
     inversion_done: bool = False
     cisd_done: bool = False
+    inv_quality: float = 0.0    # quality of the FVG whose inversion confirmed
 
 
 @dataclass
@@ -97,6 +107,7 @@ class OpenTrade:
     half_closed: bool = False
     realized_r: float = 0.0     # R banked by the partial exit
     risk0: float = 0.0          # initial risk in price units (fixed at entry)
+    quality: float = 0.0        # FVG quality of the confirming inversion
 
 
 def _prepare_daily_zones(daily_df: pd.DataFrame, p: Params):
@@ -193,6 +204,20 @@ def run_strategy(daily_df: pd.DataFrame, h1_df: pd.DataFrame,
     zone_ptr = 0
     active_zones: List[FVG] = []
 
+    # Power of 3: running state of the current UTC day
+    day_open = day_high = day_low = None
+    cur_date = None
+
+    # SMT: walk-forward swings on the correlated asset, aligned by timestamp
+    smt_times = smt_highs = smt_lows = None
+    smt_ptr = 0
+    smt_sw_highs: List[Swing] = []
+    smt_sw_lows: List[Swing] = []
+    if p.smt_df is not None:
+        smt_times = p.smt_df.index
+        smt_highs = p.smt_df["high"].to_numpy()
+        smt_lows = p.smt_df["low"].to_numpy()
+
     swings: List[Swing] = []       # all confirmed 1H swings, in confirmation order
     h1_fvgs: List[FVG] = []
     bias: Optional[Bias] = None
@@ -218,6 +243,7 @@ def run_strategy(daily_df: pd.DataFrame, h1_df: pd.DataFrame,
             "outcome": outcome,
             "zone_source": trade.zone_source,
             "bars_held": t - trade.entry_idx,
+            "quality": trade.quality,
         })
 
     for t in range(len(h1_df)):
@@ -227,6 +253,21 @@ def run_strategy(daily_df: pd.DataFrame, h1_df: pd.DataFrame,
         while zone_ptr < len(pending_zones) and pending_zones[zone_ptr][0] < h1_dates[t]:
             active_zones.append(pending_zones[zone_ptr][1])
             zone_ptr += 1
+
+        # --- Power of 3: track today's open and the running extremes
+        if h1_dates[t] != cur_date:
+            cur_date = h1_dates[t]
+            day_open, day_high, day_low = opens[t], hi, lo
+        else:
+            day_high = max(day_high, hi)
+            day_low = min(day_low, lo)
+
+        # --- SMT: fold in correlated-asset bars completed by now
+        if smt_times is not None:
+            while smt_ptr < len(smt_times) and smt_times[smt_ptr] <= times[t]:
+                for s in confirm_swings_at(smt_highs, smt_lows, smt_ptr, p.swing_n):
+                    (smt_sw_highs if s.kind == "high" else smt_sw_lows).append(s)
+                smt_ptr += 1
 
         # --- manage open position first (stop checked before target: conservative)
         if open_trade is not None:
@@ -305,13 +346,33 @@ def run_strategy(daily_df: pd.DataFrame, h1_df: pd.DataFrame,
                         and f.formed_idx >= bias.opened_idx - p.h1_fvg_max_age
                         and f.quality >= p.min_fvg_quality):
                     bias.inversion_done = True
+                    bias.inv_quality = f.quality
             if cisd == bias.direction:
                 bias.cisd_done = True
+
+        # --- contextual gates that depend on market state (not just the clock)
+        def state_gates_pass() -> bool:
+            if p.po3:
+                manipulated = (day_high > day_open if bias.direction == "bearish"
+                               else day_low < day_open)
+                if not manipulated:
+                    return False
+            if p.smt_df is not None:
+                cutoff_own = t - p.smt_lookback_bars
+                own_h = [s.price for s in swings if s.kind == "high" and s.idx >= cutoff_own]
+                own_l = [s.price for s in swings if s.kind == "low" and s.idx >= cutoff_own]
+                cutoff_ts = times[t] - pd.Timedelta(hours=p.smt_lookback_bars)
+                oth_h = [s.price for s in smt_sw_highs if smt_times[s.idx] >= cutoff_ts]
+                oth_l = [s.price for s in smt_sw_lows if smt_times[s.idx] >= cutoff_ts]
+                if not smt_ok(bias.direction, own_h, own_l, oth_h, oth_l, p.smt_inverse):
+                    return False
+            return True
 
         # --- entry
         if (bias is not None and open_trade is None
                 and bias.inversion_done and bias.cisd_done
-                and _entry_allowed(times[t], p)):
+                and _entry_allowed(times[t], p)
+                and state_gates_pass()):
             lb = max(0, t - p.stop_lookback + 1)
             if bias.direction == "bearish":
                 stop = float(np.max(highs[lb:t + 1])) * (1 + p.stop_buffer)
@@ -326,7 +387,8 @@ def run_strategy(daily_df: pd.DataFrame, h1_df: pd.DataFrame,
             if risk > 0:
                 t1, rr1, t2, rr2 = _pick_targets(direction, entry, risk, swings, t, p)
                 open_trade = OpenTrade(direction, t, entry, stop, t2, rr2,
-                                       bias.zone.source, t1=t1, rr1=rr1, risk0=risk)
+                                       bias.zone.source, t1=t1, rr1=rr1, risk0=risk,
+                                       quality=bias.inv_quality)
                 bias.zone.consumed = True
             bias = None
 

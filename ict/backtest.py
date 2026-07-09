@@ -6,16 +6,24 @@ import pandas as pd
 
 
 def compute_stats(trades: pd.DataFrame, risk_pct: float = 0.01,
-                  starting_equity: float = 10_000.0) -> Optional[dict]:
-    """Compute performance stats from the trade list (fixed fractional risk)."""
+                  starting_equity: float = 10_000.0,
+                  dynamic_risk: bool = False) -> Optional[dict]:
+    """Compute performance stats from the trade list (fixed fractional risk).
+
+    ``dynamic_risk`` scales each trade's risk by its FVG quality score,
+    clipped to [0.5, 1.5] x ``risk_pct``. R-based stats are unaffected —
+    only the equity curve, return, and drawdown change.
+    """
     if trades.empty:
         return None
 
     trades = trades.sort_values("exit_time").reset_index(drop=True)
     equity = starting_equity
     curve = [equity]
-    for r in trades["r"]:
-        equity *= 1 + risk_pct * r
+    qualities = trades["quality"] if "quality" in trades else pd.Series(1.0, index=trades.index)
+    for r, q in zip(trades["r"], qualities):
+        scale = min(1.5, max(0.5, float(q))) if dynamic_risk else 1.0
+        equity *= 1 + risk_pct * scale * r
         curve.append(equity)
     curve = pd.Series(curve)
 

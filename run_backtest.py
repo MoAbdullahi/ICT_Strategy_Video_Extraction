@@ -37,6 +37,15 @@ def main():
     ap.add_argument("--refined", action="store_true",
                     help="Preset: --quality 0.5 --partials (the only refinements that "
                          "survived ablation testing; see README)")
+    ap.add_argument("--po3", action="store_true",
+                    help="Power of 3: entry only after price manipulated beyond today's open "
+                         "against the bias direction")
+    ap.add_argument("--smt", default=None, metavar="TICKER",
+                    help='Require SMT divergence vs a correlated asset, e.g. "DX-Y.NYB"')
+    ap.add_argument("--smt-same", action="store_true",
+                    help="SMT asset is positively correlated (default: inversely, like DXY)")
+    ap.add_argument("--dynamic-risk", action="store_true",
+                    help="Scale per-trade risk by FVG quality (0.5-1.5 x base risk)")
     args = ap.parse_args()
 
     day_map = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
@@ -60,6 +69,11 @@ def main():
     print(f"  daily bars: {len(daily)}   1H bars: {len(h1)}"
           f"   ({h1.index[0]:%Y-%m-%d} -> {h1.index[-1]:%Y-%m-%d})")
 
+    smt_df = None
+    if args.smt:
+        print(f"Fetching SMT asset {args.smt} (1H)...")
+        smt_df = fetch(args.smt, "1h", args.h1_period, use_cache=not args.no_cache)
+
     params = Params(
         killzones=killzones,
         allowed_days=allowed_days,
@@ -67,9 +81,12 @@ def main():
         min_fvg_quality=args.quality,
         cisd_min_body_atr=args.cisd_body,
         partial_targets=args.partials,
+        po3=args.po3,
+        smt_df=smt_df,
+        smt_inverse=not args.smt_same,
     )
     trades = run_strategy(daily, h1, params)
-    stats = compute_stats(trades, risk_pct=params.risk_pct)
+    stats = compute_stats(trades, risk_pct=params.risk_pct, dynamic_risk=args.dynamic_risk)
     print()
     print(format_stats(stats))
 
@@ -77,6 +94,8 @@ def main():
         RESULTS_DIR.mkdir(exist_ok=True)
         safe = args.symbol.replace("=", "_").replace("/", "_").replace("^", "_")
         suffix = "_refined" if args.refined else ""
+        if args.smt:
+            suffix += "_smt"
         out = RESULTS_DIR / f"trades_{safe}{suffix}.csv"
         trades.to_csv(out, index=False)
         print(f"\nTrade log written to {out}")

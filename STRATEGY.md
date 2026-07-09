@@ -127,10 +127,20 @@ on the same data (see the README for results — most did **not** help).
 | `allowed_days` | None | weekday whitelist (0=Mon..6=Sun). **Warning: any day-of-week choice is mined from in-sample results** |
 | `news_times` / `news_buffer_min` | None / 60 | block entries within a buffer of supplied high-impact news timestamps (user-provided CSV via `--news-csv`) |
 | `atr_n` | 14 | ATR period used by the displacement measures |
+| `po3` | False | Power of 3: entry only after price has manipulated beyond today's open against the bias (Judas swing). *Tested neutral-to-worse* |
+| `smt_df` / `smt_inverse` | None / True | require SMT divergence against a correlated asset's 1H swings (e.g. DXY for EURUSD): the traded pair makes the new extreme, the correlated asset fails to confirm. Fails closed when swings are missing. *Best-performing filter on USD majors, but mixed across pairs* |
+| `smt_lookback_bars` | 120 | swings older than this are ignored by the SMT check |
+
+Dynamic position sizing (`--dynamic-risk`) lives in the accounting layer
+(`ict/backtest.py`): per-trade risk = `risk_pct` × FVG quality clipped to
+[0.5, 1.5]. *Tested worse than flat sizing — quality does not predict outcome
+beyond the 0.5 threshold.*
 
 CLI equivalents: `--quality`, `--partials`, `--cisd-body`, `--killzones "7-10,12-15"`,
-`--days Mon,Tue,Thu`, `--news-csv file.csv`, and `--refined`
-(= `--quality 0.5 --partials`, the only combination that survived testing).
+`--days Mon,Tue,Thu`, `--news-csv file.csv`, `--po3`, `--smt DX-Y.NYB`
+(`--smt-same` for positively-correlated assets), `--dynamic-risk`, and
+`--refined` (= `--quality 0.5 --partials`, the only combination that survived
+ablation testing).
 
 ---
 
