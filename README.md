@@ -4,6 +4,11 @@ A faithful, fully-testable Python implementation of the ICT (Inner Circle
 Trader) multi-timeframe strategy described in a trading video, backtested on
 free Yahoo Finance data.
 
+> **TL;DR — [FINDINGS.md](FINDINGS.md)** synthesizes the whole research arc:
+> the video's rules are a coin flip, honest filtering makes it a
+> better-behaved coin flip, and every further "optimization" either failed
+> ablation testing or needs more data than Yahoo provides.
+
 **The pipeline this repo documents:** a strategy video was extracted and
 transcribed → the rules were formalized into precise mathematical logic → the
 logic was implemented as a walk-forward backtest → the claims were tested on
@@ -191,6 +196,7 @@ python -m unittest discover -s tests
 
 ```
 ├── README.md                  <- you are here
+├── FINDINGS.md                <- final research synthesis & scoreboard
 ├── STRATEGY.md                <- exact strategy rules & parameters
 ├── run_backtest.py            <- CLI entry point
 ├── requirements.txt
