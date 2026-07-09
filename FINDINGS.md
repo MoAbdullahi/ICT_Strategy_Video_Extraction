@@ -76,7 +76,36 @@ predicted before a single line of the engine was written.
   against a basket (DXY, yields, correlated pairs), with intraday timing
   finer than 1H, before trusting it with risk.
 
-## 5. Bottom line
+## 5. Postscript: the ES/NQ futures test
+
+The video's trader operates in index futures, so `--refined` was run on ES=F
+and NQ=F (Yahoo hourly history: 2024-02 → 2026-07), with each contract using
+the other as its SMT pair (`--smt-same`, the classic ICT ES/NQ divergence):
+
+| Configuration | Trades | Win % | Total R | PF | Max DD | Halves R |
+|---------------|-------:|------:|--------:|---:|-------:|---------:|
+| ES refined | 67 | 46.3 | +8.51 | 1.24 | −10.9% | +6.3 / +2.2 |
+| ES refined + SMT(NQ) | 37 | 51.4 | +5.74 | 1.32 | −4.6% | +7.2 / −1.5 |
+| NQ refined | 69 | 44.9 | +10.39 | 1.27 | −6.1% | +7.3 / +3.1 |
+| NQ refined + SMT(ES) | 33 | 36.4 | +0.40 | 1.02 | −4.4% | +1.2 / −0.8 |
+
+At face value the futures baselines finally look like an edge (PF ~1.25,
+positive in both halves). The direction breakdown says otherwise:
+
+- ES: longs +11.5R over 55 trades, shorts **−3.0R** over 12
+- NQ: longs +13.2R over 50 trades, shorts **−2.8R** over 19
+
+All of the profit is long-side, earned during 2024–2026 — a strong equity
+bull market in which *any* long-biased entry with 2–3R targets did well.
+This is directional beta, not evidence the ICT mechanics add alpha; the
+video's own trade (a short) belongs to the losing side of the table. And the
+SMT filter is again inconsistent: it improved ES's ratios (PF 1.32, drawdown
+halved, but negative second half) while gutting NQ (+10.4R → +0.4R). A bear
+or sideways regime in the data would be needed to separate strategy from
+market — which loops back to the same conclusion as section 4: longer
+history, which Yahoo cannot provide.
+
+## 6. Bottom line
 
 This repository is a research platform, not a trading system. Its honest,
 reproducible answer to the original video is: **the mechanical rules, as
