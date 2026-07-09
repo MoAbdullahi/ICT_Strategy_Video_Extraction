@@ -1,0 +1,9 @@
+# cached Yahoo Finance downloads
+data/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
